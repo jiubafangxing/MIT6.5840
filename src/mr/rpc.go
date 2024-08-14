@@ -24,18 +24,18 @@ type ExampleReply struct {
 
 // Add your RPC definitions here.
 type WorkerArgs struct {
-	TaskNo int
-	WorkderId int	
+	TaskNo   int
+	WorkerId int
 }
 
 type WorkerReply struct {
-	FileName string
+	FileName []string
 	TaskNo   int
 	TaskType int
 }
 
 type FinishArgs struct {
-	TaskNo int
+	TaskNo          int
 	ResultFileNames []string
 }
 

@@ -6,18 +6,26 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 )
 import "log"
 import "net/rpc"
 import "hash/fnv"
-import "os"
+
 // Map functions return a slice of KeyValue.
 type KeyValue struct {
 	Key   string
 	Value string
 }
+
+type ByKey []KeyValue
+
+// for sorting by key.
+func (a ByKey) Len() int           { return len(a) }
+func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
 
 // use ihash(key) % NReduce to choose the reduce
 // task number for each KeyValue emitted by Map.
@@ -38,7 +46,7 @@ func Worker(mapf func(string, string) []KeyValue,
 		case MAP_TASK:
 			MapWorkTask(mapf, err, reply, intermediate)
 		case REDUCE_TASK:
-
+			ReduceWorkTask(reducef, err, reply)
 		}
 	}
 
@@ -47,10 +55,69 @@ func Worker(mapf func(string, string) []KeyValue,
 
 }
 
+func ReduceWorkTask(reducef func(string, []string) string, err error, reply WorkerReply) {
+	toParseFiles := reply.FileName
+	if len(toParseFiles) > 0 {
+		files := make([]*os.File, 1)
+		for {
+			file, err := os.Open(reply.FileName[0])
+			if err != nil {
+				log.Fatalf("cannot open %v", reply.FileName)
+			}
+			files = append(files, file)
+		}
+		intermediate := []KeyValue{}
+		for _, file := range files {
+			reader := json.NewDecoder(file)
+			for {
+				var kv KeyValue
+				if err := reader.Decode(&kv); err != nil {
+					if err.Error() == "EOF" {
+						break
+					}
+				}
+				intermediate = append(intermediate, kv)
+			}
+
+		}
+		sort.Sort(ByKey(intermediate))
+		oname := fmt.Sprintf("mr-out-%d", reply.TaskNo)
+		ofile, _ := os.Create(oname)
+
+		//
+		// call Reduce on each distinct key in intermediate[],
+		// and print the result to mr-out-0.
+		//
+		i := 0
+		for i < len(intermediate) {
+			j := i + 1
+			for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
+				j++
+			}
+			values := []string{}
+			for k := i; k < j; k++ {
+				values = append(values, intermediate[k].Value)
+			}
+			output := reducef(intermediate[i].Key, values)
+
+			// this is the correct format for each line of Reduce output.
+			fmt.Fprintf(ofile, "%v %v\n", intermediate[i].Key, output)
+
+			i = j
+		}
+
+		ofile.Close()
+		defer func() {
+			for _, file := range files {
+				file.Close()
+			}
+		}()
+	}
+}
 func MapWorkTask(mapf func(string, string) []KeyValue, err error, reply WorkerReply, intermediate []KeyValue) {
-	resultFileNames := make([]string)
+	resultFileNames := make([]string, 1)
 	if nil != err && len(reply.FileName) > 0 {
-		file, err := os.Open(reply.FileName)
+		file, err := os.Open(reply.FileName[0])
 		if err != nil {
 			log.Fatalf("cannot open %v", reply.FileName)
 		}
@@ -59,7 +126,7 @@ func MapWorkTask(mapf func(string, string) []KeyValue, err error, reply WorkerRe
 			log.Fatalf("cannot read %v", reply.FileName)
 		}
 		file.Close()
-		kva := mapf(reply.FileName, string(content))
+		kva := mapf(reply.FileName[0], string(content))
 		intermediate = append(intermediate, kva...)
 		var resultData map[string][]KeyValue = make(map[string][]KeyValue)
 		var openFiles map[string]*json.Encoder
@@ -85,29 +152,26 @@ func MapWorkTask(mapf func(string, string) []KeyValue, err error, reply WorkerRe
 		}
 		for resultDateItemK, resultDateItemV := range resultData {
 			encoder := openFiles[resultDateItemK]
-			resultFileNames = append(resultFileNames,resultDataItemK)
+			resultFileNames = append(resultFileNames, resultDateItemK)
 			for _, item := range resultDateItemV {
 				encoder.Encode(item)
 			}
 		}
 	}
-	defer CallFinish(reply.TaskNo,resultFileNames)
+	defer CallFinish(reply.TaskNo, resultFileNames)
 }
 
 func CallFinish(taskNo int, resultFileNames []string) {
-	if nil == TaskNo {
-		return
-	}
-	args := WorkerArgs{}
-	args.TaskNo =  taskNo
+	args := FinishArgs{}
+	args.TaskNo = taskNo
 	args.ResultFileNames = resultFileNames
 	reply := WorkerReply{}
 	call("Coordinator.State", &args, &reply)
 }
 func ApplyTask() (filname WorkerReply, err error) {
 	// it could be more standalone if append ip
-	pid := os.GetPid()
-	args := WorkerArgs{WorkerId:pid,}
+	pid := os.Getpid()
+	args := WorkerArgs{WorkerId: pid}
 	reply := WorkerReply{}
 	ok := call("Coordinator.ApplyTask", &args, &reply)
 	if ok {
