@@ -29,13 +29,15 @@ type WorkerArgs struct {
 }
 
 type WorkerReply struct {
-	FileName []string
-	TaskNo   int
-	TaskType int
+	FileName    []string
+	TaskNo      int
+	TaskType    int
+	REDUCE_NUMS int
 }
 
 type FinishArgs struct {
 	TaskNo          int
+	TaskType        int
 	ResultFileNames []string
 }
 

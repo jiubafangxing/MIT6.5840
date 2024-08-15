@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 import "log"
 import "net/rpc"
@@ -47,6 +48,11 @@ func Worker(mapf func(string, string) []KeyValue,
 			MapWorkTask(mapf, err, reply, intermediate)
 		case REDUCE_TASK:
 			ReduceWorkTask(reducef, err, reply)
+		case WAIT_TASK:
+			WaitTask()
+		case EXIT_TASK:
+			log.Println("worker exit")
+			return
 		}
 	}
 
@@ -55,14 +61,19 @@ func Worker(mapf func(string, string) []KeyValue,
 
 }
 
+func WaitTask() {
+	time.Sleep(time.Second * 1)
+}
+
 func ReduceWorkTask(reducef func(string, []string) string, err error, reply WorkerReply) {
 	toParseFiles := reply.FileName
+	results := make([]string, 0)
 	if len(toParseFiles) > 0 {
-		files := make([]*os.File, 1)
-		for {
-			file, err := os.Open(reply.FileName[0])
+		files := make([]*os.File, 0) // 注意：初始大小为0，而不是1
+		for i := 0; i < len(toParseFiles); i++ {
+			file, err := os.Open(toParseFiles[i])
 			if err != nil {
-				log.Fatalf("cannot open %v", reply.FileName)
+				log.Fatalf("cannot open %v, error: %v", toParseFiles[i], err)
 			}
 			files = append(files, file)
 		}
@@ -82,6 +93,7 @@ func ReduceWorkTask(reducef func(string, []string) string, err error, reply Work
 		}
 		sort.Sort(ByKey(intermediate))
 		oname := fmt.Sprintf("mr-out-%d", reply.TaskNo)
+		results = append(results, oname)
 		ofile, _ := os.Create(oname)
 
 		//
@@ -112,11 +124,12 @@ func ReduceWorkTask(reducef func(string, []string) string, err error, reply Work
 				file.Close()
 			}
 		}()
+		defer CallFinish(reply.TaskNo, reply.TaskType, results)
 	}
 }
 func MapWorkTask(mapf func(string, string) []KeyValue, err error, reply WorkerReply, intermediate []KeyValue) {
 	resultFileNames := make([]string, 1)
-	if nil != err && len(reply.FileName) > 0 {
+	if nil == err && len(reply.FileName) > 0 {
 		file, err := os.Open(reply.FileName[0])
 		if err != nil {
 			log.Fatalf("cannot open %v", reply.FileName)
@@ -129,16 +142,17 @@ func MapWorkTask(mapf func(string, string) []KeyValue, err error, reply WorkerRe
 		kva := mapf(reply.FileName[0], string(content))
 		intermediate = append(intermediate, kva...)
 		var resultData map[string][]KeyValue = make(map[string][]KeyValue)
-		var openFiles map[string]*json.Encoder
+		var openFiles map[string]*json.Encoder = make(map[string]*json.Encoder)
 		for _, item := range intermediate {
 			intermediateFileName := "mr"
-			reduceNo := ihash(item.Key)
+			reduceNo := ihash(item.Key) % reply.REDUCE_NUMS
 			elems := []string{intermediateFileName, strconv.Itoa(reply.TaskNo), strconv.Itoa(reduceNo)}
 			intermediateFileName = strings.Join(elems, "-")
 			if nil == openFiles[intermediateFileName] {
 				ofile, _ := os.Create(intermediateFileName)
 				writer := json.NewEncoder(ofile)
 				openFiles[intermediateFileName] = writer
+				defer ofile.Close()
 			}
 			var existData []KeyValue = resultData[intermediateFileName]
 			if nil != existData && len(existData) > 0 {
@@ -148,7 +162,6 @@ func MapWorkTask(mapf func(string, string) []KeyValue, err error, reply WorkerRe
 				existData[0] = item
 			}
 			resultData[intermediateFileName] = existData
-
 		}
 		for resultDateItemK, resultDateItemV := range resultData {
 			encoder := openFiles[resultDateItemK]
@@ -158,12 +171,13 @@ func MapWorkTask(mapf func(string, string) []KeyValue, err error, reply WorkerRe
 			}
 		}
 	}
-	defer CallFinish(reply.TaskNo, resultFileNames)
+	defer CallFinish(reply.TaskNo, reply.TaskType, resultFileNames)
 }
 
-func CallFinish(taskNo int, resultFileNames []string) {
+func CallFinish(taskNo int, taskType int, resultFileNames []string) {
 	args := FinishArgs{}
 	args.TaskNo = taskNo
+	args.TaskType = taskType
 	args.ResultFileNames = resultFileNames
 	reply := WorkerReply{}
 	call("Coordinator.State", &args, &reply)
