@@ -67,6 +67,7 @@ func WaitTask() {
 
 func ReduceWorkTask(reducef func(string, []string) string, err error, reply WorkerReply) {
 	toParseFiles := reply.FileName
+	//log.Printf("重新执行，filenames%v\n", toParseFiles)
 	results := make([]string, 0)
 	if len(toParseFiles) > 0 {
 		files := make([]*os.File, 0) // 注意：初始大小为0，而不是1
@@ -77,6 +78,8 @@ func ReduceWorkTask(reducef func(string, []string) string, err error, reply Work
 			}
 			files = append(files, file)
 		}
+
+		//log.Printf("exe 1")
 		intermediate := []KeyValue{}
 		for _, file := range files {
 			reader := json.NewDecoder(file)
@@ -91,6 +94,7 @@ func ReduceWorkTask(reducef func(string, []string) string, err error, reply Work
 			}
 
 		}
+		//log.Printf("exe 2")
 		sort.Sort(ByKey(intermediate))
 		oname := fmt.Sprintf("mr-out-%d", reply.TaskNo)
 		results = append(results, oname)
@@ -101,6 +105,7 @@ func ReduceWorkTask(reducef func(string, []string) string, err error, reply Work
 		// and print the result to mr-out-0.
 		//
 		i := 0
+		//lo gg.Printf("exe 3")
 		for i < len(intermediate) {
 			j := i + 1
 			for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {

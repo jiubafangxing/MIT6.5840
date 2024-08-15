@@ -26,13 +26,14 @@ type Coordinator struct {
 	// Your definitions here.
 	WorkerId                      []int
 	AllMapTasks                   []string
+	AllReduceTasks                []string
 	FreeTasks                     []string
 	RunningMapTaskMap             map[int]TaskState
 	FinishMapTaskMap              map[int]TaskState
 	FinishFileOfMapTaskMap        map[string]TaskState
 	RunningRuducemap              map[int]TaskState
 	FinishReduceTaskMap           map[int]TaskState
-	FinishFileOfReduceTaskMap     map[string]TaskState
+	FinishFileOfReduceTaskMap     map[int]TaskState
 	cacheIntermediateFileNamesMap map[string][]string
 	AllReduceNums                 int
 	RemainingReduceCount          int
@@ -72,6 +73,7 @@ func (c *Coordinator) ApplyTask(args *WorkerArgs, reply *WorkerReply) error {
 	if len(c.FreeTasks) > 0 {
 		tasksize := len(c.FreeTasks)
 		allocateTask := c.FreeTasks[tasksize-1 : tasksize]
+		//log.Printf("allocate map task for %d is %s", c.CurMapNo, allocateTask)
 		c.FreeTasks = c.FreeTasks[:tasksize-1]
 		taskState := TaskState{
 			TaskType:       MAP_TASK,
@@ -108,7 +110,28 @@ func (c *Coordinator) ApplyTask(args *WorkerArgs, reply *WorkerReply) error {
 				reply.REDUCE_NUMS = c.AllReduceNums
 			} else {
 				exitTask := true
-
+				if len(c.FinishReduceTaskMap) != c.AllReduceNums {
+					for _, v := range c.RunningRuducemap {
+						if _, ok := c.FinishReduceTaskMap[v.TaskNo]; !ok {
+							exitTask = false
+							taskState := TaskState{
+								TaskType:       REDUCE_TASK,
+								InputFileNames: v.InputFileNames,
+								State:          INIT,
+								BeginTime:      time.Now().UnixNano(),
+								EndTime:        -1,
+								TaskNo:         v.TaskNo,
+							}
+							c.RunningRuducemap[v.TaskNo] = taskState
+							reply.FileName = taskState.InputFileNames
+							reply.TaskNo = taskState.TaskNo
+							reply.TaskType = REDUCE_TASK
+							reply.REDUCE_NUMS = c.AllReduceNums
+							//log.Printf("重新执行%d reduce task %d", reply.TaskNo, v.TaskNo)
+							return nil
+						}
+					}
+				}
 				if exitTask {
 					log.Println("exit")
 					reply.TaskType = EXIT_TASK
@@ -119,10 +142,10 @@ func (c *Coordinator) ApplyTask(args *WorkerArgs, reply *WorkerReply) error {
 			//如果超过10s仍然没有完成，会分配新的task
 			for _, v := range c.RunningMapTaskMap {
 				if time.Now().UnixNano()-v.BeginTime > int64(10*time.Second) {
-					log.Println("maptask : taskno :%d running failed: reallocate", v.TaskNo)
-					names := c.allocateIntermediateFileNames(v.TaskNo)
+					//log.Println("maptask : taskno :%d running failed: reallocate", v.TaskNo)
+					names := v.InputFileNames
 					taskState := TaskState{
-						TaskType:       REDUCE_TASK,
+						TaskType:       MAP_TASK,
 						InputFileNames: names,
 						State:          INIT,
 						BeginTime:      time.Now().UnixNano(),
@@ -134,7 +157,7 @@ func (c *Coordinator) ApplyTask(args *WorkerArgs, reply *WorkerReply) error {
 					c.CurReduceNo = c.CurReduceNo + 1
 					reply.FileName = names
 					reply.TaskNo = taskState.TaskNo
-					reply.TaskType = REDUCE_TASK
+					reply.TaskType = MAP_TASK
 					reply.REDUCE_NUMS = c.AllReduceNums
 					exeWait = false
 					break
@@ -164,7 +187,9 @@ func (c *Coordinator) allocateIntermediateFileNames(curNo int) []string {
 	}
 	allocateKey := curNo % c.AllReduceNums
 	allocateKeyStr := fmt.Sprintf("%d", allocateKey)
-	return c.cacheIntermediateFileNamesMap[allocateKeyStr]
+	taskNames := c.cacheIntermediateFileNamesMap[allocateKeyStr]
+	//log.Printf("allocate taskNames %v for map  taskNo %d\n", taskNames, allocateKey)
+	return taskNames
 }
 func (c *Coordinator) State(args *FinishArgs, reply *FinishReply) error {
 	var taskState TaskState
@@ -179,6 +204,7 @@ func (c *Coordinator) State(args *FinishArgs, reply *FinishReply) error {
 		taskState.ResultFileNames = args.ResultFileNames
 		taskState.State = 2
 		delete(c.RunningMapTaskMap, taskState.TaskNo)
+
 		c.FinishMapTaskMap[taskState.TaskNo] = taskState
 		//log.Println("taskState")
 		//log.Println(taskState)
@@ -188,21 +214,39 @@ func (c *Coordinator) State(args *FinishArgs, reply *FinishReply) error {
 		//}
 		taskFileName := taskState.InputFileNames[0]
 		if _, ok := c.FinishFileOfMapTaskMap[taskFileName]; !ok {
+			//log.Printf("all input files %v\n", c.AllMapTasks)
+			//log.Printf("map task finish for taskNo %d of taskFileName %s\n", args.TaskNo, taskFileName)
+			log.Printf("map taskNo %d of mapInputName %s\n", args.TaskNo, taskFileName)
+			log.Printf("map taskNo %d of mapoutputName %s\n", args.TaskNo, args.ResultFileNames)
+			for _, r := range args.ResultFileNames {
+				rnameitems := strings.Split(r, "-")
+				c.AllReduceTasks = append(c.AllReduceTasks, rnameitems[len(rnameitems)-1])
+			}
+			//
 			c.FinishFileOfMapTaskMap[taskFileName] = taskState
 		}
 	case REDUCE_TASK:
 		taskState = c.RunningRuducemap[args.TaskNo]
-		reduceFileName := args.ResultFileNames[0]
+		delete(c.RunningRuducemap, taskState.TaskNo)
+		taskNo := args.TaskNo
 		taskState.ResultFileNames = args.ResultFileNames
 		taskState.EndTime = time.Now().UnixNano()
 		taskState.State = 2
-		if _, ok := c.FinishFileOfReduceTaskMap[reduceFileName]; !ok {
-			c.FinishFileOfReduceTaskMap[reduceFileName] = taskState
+		if _, ok := c.FinishReduceTaskMap[taskNo]; !ok {
+			log.Printf("reduce finsih %d\n", taskState.TaskNo)
+			c.FinishReduceTaskMap[taskNo] = taskState
 		}
-		c.FinishReduceTaskMap[args.TaskNo] = taskState
 	}
 	reply.TaskNo = taskState.TaskNo
 	return nil
+}
+func (c *Coordinator) ContainsReduce(target string) bool {
+	for _, str := range c.AllReduceTasks {
+		if strings.Index(str, target) != -1 {
+			return true
+		}
+	}
+	return false
 }
 
 // start a thread that listens for RPCs from worker.go
@@ -222,8 +266,10 @@ func (c *Coordinator) server() {
 // main/mrcoordinator.go calls Done() periodically to find out
 // if the entire job has finished.
 func (c *Coordinator) Done() bool {
-	ret := len(c.FinishFileOfReduceTaskMap) == c.AllReduceNums
-	log.Printf("finished %v\n ", ret)
+	ret := len(c.FinishReduceTaskMap) == c.AllReduceNums
+	//log.Printf("finished %v\n ", ret)
+	//log.Printf("%d", len(c.FinishMapTaskMap))
+	//log.Printf("%d", c.AllReduceNums)
 	return ret
 }
 
@@ -244,7 +290,6 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 		FinishFileOfMapTaskMap:        make(map[string]TaskState),
 		RunningRuducemap:              make(map[int]TaskState),
 		FinishReduceTaskMap:           make(map[int]TaskState),
-		FinishFileOfReduceTaskMap:     make(map[string]TaskState),
 		cacheIntermediateFileNamesMap: make(map[string][]string),
 		AllReduceNums:                 nReduce,
 		RemainingReduceCount:          nReduce,
