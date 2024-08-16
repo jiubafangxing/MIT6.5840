@@ -3,6 +3,7 @@ package mr
 import (
 	"fmt"
 	"log"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -36,9 +37,8 @@ type Coordinator struct {
 	FinishFileOfReduceTaskMap     map[int]TaskState
 	cacheIntermediateFileNamesMap map[string][]string
 	AllReduceNums                 int
-	RemainingReduceCount          int
+	RemainingReduceNo             []int
 	CurMapNo                      int
-	CurReduceNo                   int
 	taskAllocateMutex             sync.Mutex
 	StateWriteMutex               sync.Mutex
 }
@@ -91,26 +91,26 @@ func (c *Coordinator) ApplyTask(args *WorkerArgs, reply *WorkerReply) error {
 		return nil
 	} else {
 		if len(c.FinishFileOfMapTaskMap) == len(c.AllMapTasks) {
-			if c.RemainingReduceCount > 0 {
-				reduceInputFileNames := c.allocateIntermediateFileNames(c.CurReduceNo)
+			if len(c.RemainingReduceNo) > 0 {
+				allocateNo := c.RemainingReduceNo[len(c.RemainingReduceNo)-1:][0]
+				reduceInputFileNames := c.allocateIntermediateFileNames(allocateNo)
 				taskState := TaskState{
 					TaskType:       REDUCE_TASK,
 					InputFileNames: reduceInputFileNames,
 					State:          INIT,
 					BeginTime:      time.Now().UnixNano(),
 					EndTime:        -1,
-					TaskNo:         c.CurReduceNo,
+					TaskNo:         allocateNo,
 				}
-				c.RunningRuducemap[c.CurReduceNo] = taskState
-				c.RemainingReduceCount -= 1
-				c.CurReduceNo = c.CurReduceNo + 1
+				c.RunningRuducemap[allocateNo] = taskState
+				c.RemainingReduceNo = c.RemainingReduceNo[0 : len(c.RemainingReduceNo)-1]
 				reply.FileName = reduceInputFileNames
 				reply.TaskNo = taskState.TaskNo
 				reply.TaskType = REDUCE_TASK
 				reply.REDUCE_NUMS = c.AllReduceNums
 			} else {
 				exitTask := true
-				if len(c.FinishReduceTaskMap) != c.AllReduceNums {
+				if len(c.FinishReduceTaskMap) != len(c.AllReduceTasks) {
 					for _, v := range c.RunningRuducemap {
 						if _, ok := c.FinishReduceTaskMap[v.TaskNo]; !ok {
 							exitTask = false
@@ -127,7 +127,7 @@ func (c *Coordinator) ApplyTask(args *WorkerArgs, reply *WorkerReply) error {
 							reply.TaskNo = taskState.TaskNo
 							reply.TaskType = REDUCE_TASK
 							reply.REDUCE_NUMS = c.AllReduceNums
-							//log.Printf("重新执行%d reduce task %d", reply.TaskNo, v.TaskNo)
+							log.Printf("重新执行%d reduce task %d", reply.TaskNo, v.TaskNo)
 							return nil
 						}
 					}
@@ -150,21 +150,20 @@ func (c *Coordinator) ApplyTask(args *WorkerArgs, reply *WorkerReply) error {
 						State:          INIT,
 						BeginTime:      time.Now().UnixNano(),
 						EndTime:        -1,
-						TaskNo:         c.CurReduceNo,
+						TaskNo:         v.TaskNo,
 					}
-					c.RunningRuducemap[c.CurReduceNo] = taskState
-					c.RemainingReduceCount -= 1
-					c.CurReduceNo = c.CurReduceNo + 1
+					c.RunningMapTaskMap[v.TaskNo] = taskState
 					reply.FileName = names
-					reply.TaskNo = taskState.TaskNo
+					reply.TaskNo = v.TaskNo
 					reply.TaskType = MAP_TASK
 					reply.REDUCE_NUMS = c.AllReduceNums
 					exeWait = false
-					break
+					log.Printf("重新执行%d map task %d", reply.TaskNo, v.TaskNo)
+					return nil
 				}
 			}
 			if exeWait {
-				log.Println("WAIT_TASK")
+				//log.Println("WAIT_TASK")
 				reply.TaskType = WAIT_TASK
 			}
 		}
@@ -212,18 +211,27 @@ func (c *Coordinator) State(args *FinishArgs, reply *FinishReply) error {
 		//if err != nil {
 		//	log.Printf("Error marshalling taskState: %v", err)
 		//}
-		taskFileName := taskState.InputFileNames[0]
-		if _, ok := c.FinishFileOfMapTaskMap[taskFileName]; !ok {
-			//log.Printf("all input files %v\n", c.AllMapTasks)
-			//log.Printf("map task finish for taskNo %d of taskFileName %s\n", args.TaskNo, taskFileName)
-			log.Printf("map taskNo %d of mapInputName %s\n", args.TaskNo, taskFileName)
-			log.Printf("map taskNo %d of mapoutputName %s\n", args.TaskNo, args.ResultFileNames)
-			for _, r := range args.ResultFileNames {
-				rnameitems := strings.Split(r, "-")
-				c.AllReduceTasks = append(c.AllReduceTasks, rnameitems[len(rnameitems)-1])
+		if len(taskState.InputFileNames) > 0 {
+			taskFileName := taskState.InputFileNames[0]
+			if _, ok := c.FinishFileOfMapTaskMap[taskFileName]; !ok {
+				//log.Printf("all input files %v\n", c.AllMapTasks)
+				//log.Printf("map task finish for taskNo %d of taskFileName %s\n", args.TaskNo, taskFileName)
+				//log.Printf("map taskNo %d of mapInputName %s\n", args.TaskNo, taskFileName)
+				//log.Printf("map taskNo %d of mapoutputName %s\n", args.TaskNo, args.ResultFileNames)
+				for _, r := range args.ResultFileNames {
+					rnameitems := strings.Split(r, "-")
+					//log.Printf("reducename is %s --\n", rnameitems[len(rnameitems)-1])
+					if !c.ContainsReduce(rnameitems[len(rnameitems)-1]) {
+						c.AllReduceTasks = append(c.AllReduceTasks, rnameitems[len(rnameitems)-1])
+						r, e := strconv.Atoi(rnameitems[len(rnameitems)-1])
+						if nil == e {
+							c.RemainingReduceNo = append(c.RemainingReduceNo, r)
+						}
+					}
+				}
+				//
+				c.FinishFileOfMapTaskMap[taskFileName] = taskState
 			}
-			//
-			c.FinishFileOfMapTaskMap[taskFileName] = taskState
 		}
 	case REDUCE_TASK:
 		taskState = c.RunningRuducemap[args.TaskNo]
@@ -233,7 +241,7 @@ func (c *Coordinator) State(args *FinishArgs, reply *FinishReply) error {
 		taskState.EndTime = time.Now().UnixNano()
 		taskState.State = 2
 		if _, ok := c.FinishReduceTaskMap[taskNo]; !ok {
-			log.Printf("reduce finsih %d\n", taskState.TaskNo)
+			//log.Printf("reduce finsih %d\n", taskState.TaskNo)
 			c.FinishReduceTaskMap[taskNo] = taskState
 		}
 	}
@@ -266,11 +274,16 @@ func (c *Coordinator) server() {
 // main/mrcoordinator.go calls Done() periodically to find out
 // if the entire job has finished.
 func (c *Coordinator) Done() bool {
-	ret := len(c.FinishReduceTaskMap) == c.AllReduceNums
-	//log.Printf("finished %v\n ", ret)
-	//log.Printf("%d", len(c.FinishMapTaskMap))
-	//log.Printf("%d", c.AllReduceNums)
-	return ret
+	fin := len(c.FinishReduceTaskMap)
+	all := len(c.AllReduceTasks)
+	//log.Printf("fin %d\n", fin)
+	//log.Printf("all %d\n", all)
+	//log.Printf("remaintask %d\n", c.RemainingReduceNo)
+	if len(c.AllMapTasks) == 0 {
+		return fin == all
+	} else {
+		return fin != 0 && fin == all
+	}
 }
 
 // create a Coordinator.
@@ -292,9 +305,8 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 		FinishReduceTaskMap:           make(map[int]TaskState),
 		cacheIntermediateFileNamesMap: make(map[string][]string),
 		AllReduceNums:                 nReduce,
-		RemainingReduceCount:          nReduce,
+		RemainingReduceNo:             []int{},
 		CurMapNo:                      0,
-		CurReduceNo:                   0,
 	}
 	c.server()
 	return &c

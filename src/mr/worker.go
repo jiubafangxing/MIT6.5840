@@ -129,11 +129,11 @@ func ReduceWorkTask(reducef func(string, []string) string, err error, reply Work
 				file.Close()
 			}
 		}()
-		defer CallFinish(reply.TaskNo, reply.TaskType, results)
 	}
+	defer CallFinish(reply.TaskNo, reply.TaskType, results)
 }
 func MapWorkTask(mapf func(string, string) []KeyValue, err error, reply WorkerReply, intermediate []KeyValue) {
-	resultFileNames := make([]string, 1)
+	resultFileNames := make([]string, 0)
 	if nil == err && len(reply.FileName) > 0 {
 		file, err := os.Open(reply.FileName[0])
 		if err != nil {
