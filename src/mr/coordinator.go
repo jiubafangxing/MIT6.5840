@@ -23,35 +23,29 @@ const (
 	INIT = iota
 )
 
+const (
+	ALLOCATE_MAP_TASK_STATE = iota
+	CHECK_MAP_TASK_STATE
+)
+
 type Coordinator struct {
-	// Your definitions here.
-	WorkerId                      []int
-	AllMapTasks                   []string
+	MapTaskNos                    []int
+	AllMapTasksInputFiles         []string
 	AllReduceTasks                []string
-	FreeTasks                     []string
 	RunningMapTaskMap             map[int]TaskState
 	FinishMapTaskMap              map[int]TaskState
-	FinishFileOfMapTaskMap        map[string]TaskState
-	RunningRuducemap              map[int]TaskState
+	RunningReduceMap              map[int]TaskState
 	FinishReduceTaskMap           map[int]TaskState
-	FinishFileOfReduceTaskMap     map[int]TaskState
 	cacheIntermediateFileNamesMap map[string][]string
 	AllReduceNums                 int
 	RemainingReduceNo             []int
-	CurMapNo                      int
 	taskAllocateMutex             sync.Mutex
 	StateWriteMutex               sync.Mutex
 }
 
-// Your code here -- RPC handlers for the worker to call.
 type TaskState struct {
-	TaskNo int
-	//0 means
-	TaskType int
-	//0 means init
-	//1 means start running
-	//2 means end
-	//-1 means running fail
+	TaskNo          int
+	TaskType        int
 	State           int
 	BeginTime       int64
 	EndTime         int64
@@ -70,39 +64,22 @@ func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
 func (c *Coordinator) ApplyTask(args *WorkerArgs, reply *WorkerReply) error {
 	defer c.taskAllocateMutex.Unlock()
 	c.taskAllocateMutex.Lock()
-	if len(c.FreeTasks) > 0 {
-		tasksize := len(c.FreeTasks)
-		allocateTask := c.FreeTasks[tasksize-1 : tasksize]
-		//log.Printf("allocate map task for %d is %s", c.CurMapNo, allocateTask)
-		c.FreeTasks = c.FreeTasks[:tasksize-1]
-		taskState := TaskState{
-			TaskType:       MAP_TASK,
-			InputFileNames: allocateTask,
-			State:          INIT,
-			BeginTime:      time.Now().UnixNano(),
-			EndTime:        -1,
-			TaskNo:         c.CurMapNo,
-		}
-		c.RunningMapTaskMap[c.CurMapNo] = taskState
+	if len(c.MapTaskNos) > 0 {
+		taskNo := c.allocateMapTaskNo()
+		allocateTask := c.AllMapTasksInputFiles[taskNo : taskNo+1]
+		taskState := BuildTask(allocateTask, taskNo, MAP_TASK)
+		c.RunningMapTaskMap[taskState.TaskNo] = taskState
 		reply.FileName = allocateTask
 		reply.TaskNo = taskState.TaskNo
 		reply.REDUCE_NUMS = c.AllReduceNums
-		c.CurMapNo = c.CurMapNo + 1
 		return nil
 	} else {
-		if len(c.FinishFileOfMapTaskMap) == len(c.AllMapTasks) {
+		if len(c.FinishMapTaskMap) == len(c.AllMapTasksInputFiles) {
 			if len(c.RemainingReduceNo) > 0 {
 				allocateNo := c.RemainingReduceNo[len(c.RemainingReduceNo)-1:][0]
 				reduceInputFileNames := c.allocateIntermediateFileNames(allocateNo)
-				taskState := TaskState{
-					TaskType:       REDUCE_TASK,
-					InputFileNames: reduceInputFileNames,
-					State:          INIT,
-					BeginTime:      time.Now().UnixNano(),
-					EndTime:        -1,
-					TaskNo:         allocateNo,
-				}
-				c.RunningRuducemap[allocateNo] = taskState
+				taskState := BuildTask(reduceInputFileNames, allocateNo, REDUCE_TASK)
+				c.RunningReduceMap[allocateNo] = taskState
 				c.RemainingReduceNo = c.RemainingReduceNo[0 : len(c.RemainingReduceNo)-1]
 				reply.FileName = reduceInputFileNames
 				reply.TaskNo = taskState.TaskNo
@@ -111,7 +88,7 @@ func (c *Coordinator) ApplyTask(args *WorkerArgs, reply *WorkerReply) error {
 			} else {
 				exitTask := true
 				if len(c.FinishReduceTaskMap) != len(c.AllReduceTasks) {
-					for _, v := range c.RunningRuducemap {
+					for _, v := range c.RunningReduceMap {
 						if _, ok := c.FinishReduceTaskMap[v.TaskNo]; !ok {
 							exitTask = false
 							taskState := TaskState{
@@ -122,12 +99,11 @@ func (c *Coordinator) ApplyTask(args *WorkerArgs, reply *WorkerReply) error {
 								EndTime:        -1,
 								TaskNo:         v.TaskNo,
 							}
-							c.RunningRuducemap[v.TaskNo] = taskState
+							c.RunningReduceMap[v.TaskNo] = taskState
 							reply.FileName = taskState.InputFileNames
 							reply.TaskNo = taskState.TaskNo
 							reply.TaskType = REDUCE_TASK
 							reply.REDUCE_NUMS = c.AllReduceNums
-							log.Printf("重新执行%d reduce task %d", reply.TaskNo, v.TaskNo)
 							return nil
 						}
 					}
@@ -139,40 +115,39 @@ func (c *Coordinator) ApplyTask(args *WorkerArgs, reply *WorkerReply) error {
 			}
 		} else {
 			exeWait := true
-			//如果超过10s仍然没有完成，会分配新的task
 			for _, v := range c.RunningMapTaskMap {
 				if time.Now().UnixNano()-v.BeginTime > int64(10*time.Second) {
-					//log.Println("maptask : taskno :%d running failed: reallocate", v.TaskNo)
-					names := v.InputFileNames
-					taskState := TaskState{
-						TaskType:       MAP_TASK,
-						InputFileNames: names,
-						State:          INIT,
-						BeginTime:      time.Now().UnixNano(),
-						EndTime:        -1,
-						TaskNo:         v.TaskNo,
-					}
-					c.RunningMapTaskMap[v.TaskNo] = taskState
-					reply.FileName = names
+					v.BeginTime = time.Now().UnixNano()
+					c.RunningMapTaskMap[v.TaskNo] = v
+					reply.FileName = v.InputFileNames
 					reply.TaskNo = v.TaskNo
 					reply.TaskType = MAP_TASK
 					reply.REDUCE_NUMS = c.AllReduceNums
 					exeWait = false
-					log.Printf("重新执行%d map task %d", reply.TaskNo, v.TaskNo)
 					return nil
 				}
 			}
 			if exeWait {
-				//log.Println("WAIT_TASK")
 				reply.TaskType = WAIT_TASK
 			}
 		}
 		return nil
 	}
 }
+
+func BuildTask(allocateTask []string, taskNo int, taskType int) TaskState {
+	return TaskState{
+		TaskType:       taskType,
+		InputFileNames: allocateTask,
+		State:          INIT,
+		BeginTime:      time.Now().UnixNano(),
+		EndTime:        -1,
+		TaskNo:         taskNo,
+	}
+}
 func (c *Coordinator) allocateIntermediateFileNames(curNo int) []string {
 	if len(c.cacheIntermediateFileNamesMap) == 0 {
-		for _, v := range c.FinishFileOfMapTaskMap {
+		for _, v := range c.FinishMapTaskMap {
 			for _, intermediateFileName := range v.ResultFileNames {
 				fileNameItems := strings.Split(intermediateFileName, "-")
 				match := fileNameItems[len(fileNameItems)-1]
@@ -196,31 +171,15 @@ func (c *Coordinator) State(args *FinishArgs, reply *FinishReply) error {
 	defer c.StateWriteMutex.Unlock()
 	switch args.TaskType {
 	case MAP_TASK:
-		//log.Printf("State MAP_TASK:%d\n", args.TaskNo)
 		taskState = c.RunningMapTaskMap[args.TaskNo]
-		//log.Printf("State MAP_TASK taskState:%v\n", taskState)
 		taskState.EndTime = time.Now().UnixNano()
 		taskState.ResultFileNames = args.ResultFileNames
 		taskState.State = 2
 		delete(c.RunningMapTaskMap, taskState.TaskNo)
-
-		c.FinishMapTaskMap[taskState.TaskNo] = taskState
-		//log.Println("taskState")
-		//log.Println(taskState)
-		//jsonData, err := json.Marshal(taskState)
-		//if err != nil {
-		//	log.Printf("Error marshalling taskState: %v", err)
-		//}
 		if len(taskState.InputFileNames) > 0 {
-			taskFileName := taskState.InputFileNames[0]
-			if _, ok := c.FinishFileOfMapTaskMap[taskFileName]; !ok {
-				//log.Printf("all input files %v\n", c.AllMapTasks)
-				//log.Printf("map task finish for taskNo %d of taskFileName %s\n", args.TaskNo, taskFileName)
-				//log.Printf("map taskNo %d of mapInputName %s\n", args.TaskNo, taskFileName)
-				//log.Printf("map taskNo %d of mapoutputName %s\n", args.TaskNo, args.ResultFileNames)
+			if _, ok := c.FinishMapTaskMap[taskState.TaskNo]; !ok {
 				for _, r := range args.ResultFileNames {
 					rnameitems := strings.Split(r, "-")
-					//log.Printf("reducename is %s --\n", rnameitems[len(rnameitems)-1])
 					if !c.ContainsReduce(rnameitems[len(rnameitems)-1]) {
 						c.AllReduceTasks = append(c.AllReduceTasks, rnameitems[len(rnameitems)-1])
 						r, e := strconv.Atoi(rnameitems[len(rnameitems)-1])
@@ -229,13 +188,12 @@ func (c *Coordinator) State(args *FinishArgs, reply *FinishReply) error {
 						}
 					}
 				}
-				//
-				c.FinishFileOfMapTaskMap[taskFileName] = taskState
+				c.FinishMapTaskMap[taskState.TaskNo] = taskState
 			}
 		}
 	case REDUCE_TASK:
-		taskState = c.RunningRuducemap[args.TaskNo]
-		delete(c.RunningRuducemap, taskState.TaskNo)
+		taskState = c.RunningReduceMap[args.TaskNo]
+		delete(c.RunningReduceMap, taskState.TaskNo)
 		taskNo := args.TaskNo
 		taskState.ResultFileNames = args.ResultFileNames
 		taskState.EndTime = time.Now().UnixNano()
@@ -276,13 +234,20 @@ func (c *Coordinator) server() {
 func (c *Coordinator) Done() bool {
 	fin := len(c.FinishReduceTaskMap)
 	all := len(c.AllReduceTasks)
-	//log.Printf("fin %d\n", fin)
-	//log.Printf("all %d\n", all)
-	//log.Printf("remaintask %d\n", c.RemainingReduceNo)
-	if len(c.AllMapTasks) == 0 {
+	if len(c.AllMapTasksInputFiles) == 0 {
 		return fin == all
 	} else {
 		return fin != 0 && fin == all
+	}
+}
+
+func (c *Coordinator) allocateMapTaskNo() int {
+	if len(c.MapTaskNos) > 0 {
+		result := c.MapTaskNos[len(c.MapTaskNos)-1]
+		c.MapTaskNos = c.MapTaskNos[:len(c.MapTaskNos)-1]
+		return result
+	} else {
+		return -1
 	}
 }
 
@@ -293,21 +258,27 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	//log.Println("files")
 	//log.Println(files)
 	freeList := make([]string, len(files))
+	mapTaskNos := initMapTaskNos(files)
 	copy(freeList, files)
 	c := Coordinator{
-		WorkerId:                      []int{},
-		AllMapTasks:                   files,
-		FreeTasks:                     freeList,
+		AllMapTasksInputFiles:         files,
+		MapTaskNos:                    mapTaskNos,
 		RunningMapTaskMap:             make(map[int]TaskState),
 		FinishMapTaskMap:              make(map[int]TaskState),
-		FinishFileOfMapTaskMap:        make(map[string]TaskState),
-		RunningRuducemap:              make(map[int]TaskState),
+		RunningReduceMap:              make(map[int]TaskState),
 		FinishReduceTaskMap:           make(map[int]TaskState),
 		cacheIntermediateFileNamesMap: make(map[string][]string),
 		AllReduceNums:                 nReduce,
 		RemainingReduceNo:             []int{},
-		CurMapNo:                      0,
 	}
 	c.server()
 	return &c
+}
+
+func initMapTaskNos(files []string) []int {
+	var results = make([]int, 0)
+	for idx, _ := range files {
+		results = append(results, idx)
+	}
+	return results
 }
